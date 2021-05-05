@@ -1,11 +1,12 @@
 import ResourceEditWatcher from '@joplin/lib/services/ResourceEditWatcher/index';
 import { _ } from '@joplin/lib/locale';
+import { copyHtmlToClipboard } from './clipboardUtils';
 
 const bridge = require('electron').remote.require('./bridge').default;
 const Menu = bridge().Menu;
 const MenuItem = bridge().MenuItem;
 import Resource from '@joplin/lib/models/Resource';
-import htmlUtils from '@joplin/lib/htmlUtils';
+import { processPastedHtml } from './resourceHandling';
 const fs = require('fs-extra');
 const { clipboard } = require('electron');
 const { toSystemSlashes } = require('@joplin/lib/path-utils');
@@ -48,13 +49,7 @@ function handleCopyToClipboard(options: ContextMenuOptions) {
 	if (options.textToCopy) {
 		clipboard.writeText(options.textToCopy);
 	} else if (options.htmlToCopy) {
-		// In that case we need to set both HTML and Text context, otherwise it
-		// won't be possible to paste the text in, for example, a text editor.
-		// https://github.com/laurent22/joplin/issues/4441
-		clipboard.write({
-			text: htmlUtils.stripHtml(options.htmlToCopy),
-			html: options.htmlToCopy,
-		});
+		copyHtmlToClipboard(options.htmlToCopy);
 	}
 }
 
@@ -118,7 +113,13 @@ export function menuItems(): ContextMenuItems {
 		paste: {
 			label: _('Paste'),
 			onAction: async (options: ContextMenuOptions) => {
-				const content = clipboard.readHTML() ? clipboard.readHTML() : clipboard.readText();
+				const pastedHtml = clipboard.readHTML();
+				let content = pastedHtml ? pastedHtml : clipboard.readText();
+
+				if (pastedHtml) {
+					content = await processPastedHtml(pastedHtml);
+				}
+
 				options.insertContent(content);
 			},
 			isActive: (_itemType: ContextMenuItemType, options: ContextMenuOptions) => !options.isReadOnly && (!!clipboard.readText() || !!clipboard.readHTML()),

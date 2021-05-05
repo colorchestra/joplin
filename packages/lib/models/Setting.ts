@@ -82,6 +82,12 @@ export interface SettingSection {
 	source?: SettingSectionSource;
 }
 
+export enum SyncStartupOperation {
+	None = 0,
+	ClearLocalSyncState = 1,
+	ClearLocalData = 2,
+}
+
 interface SettingSections {
 	[key: string]: SettingSection;
 }
@@ -280,6 +286,12 @@ class Setting extends BaseModel {
 
 			'sync.upgradeState': {
 				value: Setting.SYNC_UPGRADE_STATE_IDLE,
+				type: SettingItemType.Int,
+				public: false,
+			},
+
+			'sync.startupOperation': {
+				value: SyncStartupOperation.None,
 				type: SettingItemType.Int,
 				public: false,
 			},
@@ -867,7 +879,7 @@ class Setting extends BaseModel {
 						section: 'appearance',
 						label: () => _('Editor font family'),
 						description: () =>
-							_('If the font is incorrect or empty, it will default to a generic monospace font.'),
+							_('Used for most text in the markdown editor. If not found, a generic proportional (variable width) font is used.'),
 						storage: SettingStorage.File,
 					},
 			'style.editor.monospaceFontFamily': {
@@ -878,8 +890,7 @@ class Setting extends BaseModel {
 				section: 'appearance',
 				label: () => _('Editor monospace font family'),
 				description: () =>
-					_('This should be a *monospace* font or some elements will render incorrectly. If the font ' +
-				'is incorrect or empty, it will default to a generic monospace font.'),
+					_('Used where a fixed width font is needed to lay out text legibly (e.g. tables, checkboxes, code). If not found, a generic monospace (fixed width) font is used.'),
 				storage: SettingStorage.File,
 			},
 
@@ -925,6 +936,29 @@ class Setting extends BaseModel {
 				advanced: true,
 				description: () => 'CSS file support is provided for your convenience, but they are advanced settings, and styles you define may break from one version to the next. If you want to use them, please know that it might require regular development work from you to keep them working. The Joplin team cannot make a commitment to keep the application HTML structure stable.',
 			},
+
+			'sync.clearLocalSyncStateButton': {
+				value: null,
+				type: SettingItemType.Button,
+				public: true,
+				appTypes: ['desktop'],
+				label: () => _('Re-upload local data to sync target'),
+				section: 'sync',
+				advanced: true,
+				description: () => 'If the data on the sync target is incorrect or empty, you can use this button to force a re-upload of your data to the sync target. Application will have to be restarted',
+			},
+
+			'sync.clearLocalDataButton': {
+				value: null,
+				type: SettingItemType.Button,
+				public: true,
+				appTypes: ['desktop'],
+				label: () => _('Delete local data and re-download from sync target'),
+				section: 'sync',
+				advanced: true,
+				description: () => 'If the data on the sync target is correct but your local data is not, you can use this button to clear your local data and force re-downloading everything from the sync target. As your local data will be deleted first, it is recommended to export your data as JEX first. Application will have to be restarted',
+			},
+
 
 			autoUpdateEnabled: { value: false, type: SettingItemType.Bool, storage: SettingStorage.File, section: 'application', public: platform !== 'linux', appTypes: ['desktop'], label: () => _('Automatically update the application') },
 			'autoUpdate.includePreReleases': { value: false, type: SettingItemType.Bool, section: 'application', storage: SettingStorage.File, public: true, appTypes: ['desktop'], label: () => _('Get pre-releases when checking for updates'), description: () => _('See the pre-release page for more details: %s', 'https://joplinapp.org/prereleases') },
@@ -1026,10 +1060,11 @@ class Setting extends BaseModel {
 				advanced: true,
 				section: 'sync',
 				show: (settings: any) => {
-					return [SyncTargetRegistry.nameToId('nextcloud'), SyncTargetRegistry.nameToId('webdav'), SyncTargetRegistry.nameToId('joplinServer')].indexOf(settings['sync.target']) >= 0;
+					return (shim.isNode() || shim.mobilePlatform() === 'android') &&
+						[SyncTargetRegistry.nameToId('nextcloud'), SyncTargetRegistry.nameToId('webdav'), SyncTargetRegistry.nameToId('joplinServer')].indexOf(settings['sync.target']) >= 0;
 				},
 				public: true,
-				appTypes: ['desktop', 'cli'],
+				appTypes: ['desktop', 'cli', 'mobile'],
 				label: () => _('Ignore TLS certificate errors'),
 				storage: SettingStorage.File,
 			},
@@ -1134,6 +1169,14 @@ class Setting extends BaseModel {
 				'Restart app to see changes.'),
 				storage: SettingStorage.File,
 			},
+
+			isSafeMode: {
+				value: false,
+				type: SettingItemType.Bool,
+				public: false,
+				appTypes: ['desktop'],
+				storage: SettingStorage.Database,
+			},
 		};
 
 		this.metadata_ = Object.assign(this.metadata_, this.customMetadata_);
@@ -1148,6 +1191,8 @@ class Setting extends BaseModel {
 	}
 
 	static async registerSetting(key: string, metadataItem: SettingItem) {
+		if (metadataItem.isEnum && !metadataItem.options) throw new Error('The `options` property is required for enum types');
+
 		this.validateKey(key);
 
 		this.customMetadata_[key] = metadataItem;
@@ -1184,7 +1229,13 @@ class Setting extends BaseModel {
 		return output;
 	}
 
-	static keyExists(key: string) {
+	// Resets the key to its default value.
+	public static resetKey(key: string) {
+		const md = this.settingMetadata(key);
+		this.setValue(key, md.value);
+	}
+
+	public static keyExists(key: string) {
 		return key in this.metadata();
 	}
 
@@ -1333,7 +1384,7 @@ class Setting extends BaseModel {
 		this.constants_[key] = value;
 	}
 
-	static setValue(key: string, value: any) {
+	public static setValue(key: string, value: any) {
 		if (!this.cache_) throw new Error('Settings have not been initialized!');
 
 		value = this.formatValue(key, value);
@@ -1575,7 +1626,7 @@ class Setting extends BaseModel {
 		return output;
 	}
 
-	static async saveAll() {
+	public static async saveAll() {
 		if (Setting.autoSaveEnabled && !this.saveTimeoutId_) return Promise.resolve();
 
 		this.logger().debug('Saving settings...');

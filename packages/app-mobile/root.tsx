@@ -27,7 +27,7 @@ import { setLocale, closestSupportedLocale, defaultLocale } from '@joplin/lib/lo
 import SyncTargetJoplinServer from '@joplin/lib/SyncTargetJoplinServer';
 import SyncTargetOneDrive from '@joplin/lib/SyncTargetOneDrive';
 
-const { AppState, Keyboard, NativeModules, BackHandler, Animated, View, StatusBar } = require('react-native');
+const { AppState, Keyboard, NativeModules, BackHandler, Animated, View, StatusBar, Linking, Platform } = require('react-native');
 
 import NetInfo from '@react-native-community/netinfo';
 const DropdownAlert = require('react-native-dropdownalert').default;
@@ -42,7 +42,7 @@ const { shimInit } = require('./utils/shim-init-react.js');
 const { AppNav } = require('./components/app-nav.js');
 import Note from '@joplin/lib/models/Note';
 import Folder from '@joplin/lib/models/Folder';
-const BaseSyncTarget = require('@joplin/lib/BaseSyncTarget.js');
+import BaseSyncTarget from '@joplin/lib/BaseSyncTarget';
 const { FoldersScreenUtils } = require('@joplin/lib/folders-screen-utils.js');
 import Resource from '@joplin/lib/models/Resource';
 import Tag from '@joplin/lib/models/Tag';
@@ -95,6 +95,8 @@ import FsDriverRN from './utils/fs-driver-rn';
 import DecryptionWorker from '@joplin/lib/services/DecryptionWorker';
 import EncryptionService from '@joplin/lib/services/EncryptionService';
 import MigrationService from '@joplin/lib/services/MigrationService';
+import { clearSharedFilesCache } from './utils/ShareUtils';
+import setIgnoreTlsErrors from './utils/TlsUtils';
 
 let storeDispatch = function(_action: any) {};
 
@@ -508,6 +510,13 @@ async function initialize(dispatch: Function) {
 
 		setLocale(Setting.value('locale'));
 
+		if (Platform.OS === 'android') {
+			const ignoreTlsErrors = Setting.value('net.ignoreTlsErrors');
+			if (ignoreTlsErrors) {
+				await setIgnoreTlsErrors(ignoreTlsErrors);
+			}
+		}
+
 		// ----------------------------------------------------------------
 		// E2EE SETUP
 		// ----------------------------------------------------------------
@@ -564,6 +573,8 @@ async function initialize(dispatch: Function) {
 				folderId: folder.id,
 			});
 		}
+
+		await clearSharedFilesCache();
 	} catch (error) {
 		alert(`Initialization error: ${error.message}`);
 		reg.logger().error('Initialization error:', error);
@@ -628,6 +639,12 @@ class AppComponent extends React.Component {
 		this.onAppStateChange_ = () => {
 			PoorManIntervals.update();
 		};
+
+		this.handleOpenURL_ = (event: any) => {
+			if (event.url == ShareExtension.shareURL) {
+				void this.handleShareData();
+			}
+		};
 	}
 
 	// 2020-10-08: It seems the initialisation code is quite fragile in general and should be kept simple.
@@ -680,6 +697,8 @@ class AppComponent extends React.Component {
 			});
 		}
 
+		Linking.addEventListener('url', this.handleOpenURL_);
+
 		BackButtonService.initialize(this.backButtonHandler_);
 
 		AlarmService.setInAppNotificationHandler(async (alarmId: string) => {
@@ -690,21 +709,14 @@ class AppComponent extends React.Component {
 
 		AppState.addEventListener('change', this.onAppStateChange_);
 
-		const sharedData = await ShareExtension.data();
-		if (sharedData) {
-			reg.logger().info('Received shared data');
-			if (this.props.selectedFolderId) {
-				await handleShared(sharedData, this.props.selectedFolderId, this.props.dispatch);
-			} else {
-				reg.logger().info('Cannot handle share - default folder id is not set');
-			}
-		}
+		await this.handleShareData();
 
 		setUpQuickActions(this.props.dispatch, this.props.selectedFolderId);
 	}
 
 	componentWillUnmount() {
 		AppState.removeEventListener('change', this.onAppStateChange_);
+		Linking.removeEventListener('url', this.handleOpenURL_);
 		if (this.unsubscribeNetInfoHandler_) this.unsubscribeNetInfoHandler_();
 	}
 
@@ -736,6 +748,18 @@ class AppComponent extends React.Component {
 		BackHandler.exitApp();
 
 		return false;
+	}
+
+	async handleShareData() {
+		const sharedData = await ShareExtension.data();
+		if (sharedData) {
+			reg.logger().info('Received shared data');
+			if (this.props.selectedFolderId) {
+				await handleShared(sharedData, this.props.selectedFolderId, this.props.dispatch);
+			} else {
+				reg.logger().info('Cannot handle share - default folder id is not set');
+			}
+		}
 	}
 
 	UNSAFE_componentWillReceiveProps(newProps: any) {
